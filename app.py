@@ -3,6 +3,8 @@ import streamlit as st
 import re
 import plotly.graph_objects as go
 import json
+from pathlib import Path
+from logic import calculate_career_bonuses, calculate_final_stats
 
 # ==========================================
 # 1. 정밀 교정된 시스템 데이터
@@ -44,7 +46,19 @@ def is_same_team(team1, team2):
 @st.cache_data
 def load_all_data():
     try:
-        p_db, s_db, c_db = '9UP 프로야구_선수DB_202603_ver.3.xlsx', '9UP 프로야구 스킬 정보.xlsx', '9UP 프로야구 커리어 정보.xlsx'
+        player_dbs = sorted(
+            Path('.').glob('9UP 프로야구_선수DB_*.xlsx'),
+            key=lambda p: (
+                int(re.search(r'_(\d{6})', p.name).group(1))
+                if re.search(r'_(\d{6})', p.name)
+                else 0,
+                p.stat().st_mtime,
+            ),
+            reverse=True,
+        )
+        if not player_dbs:
+            raise FileNotFoundError("9UP 프로야구_선수DB_*.xlsx 파일을 찾을 수 없습니다.")
+        p_db, s_db, c_db = player_dbs[0], '9UP 프로야구 스킬 정보.xlsx', '9UP 프로야구 커리어 정보.xlsx'
         return {"p_p": pd.read_excel(p_db, sheet_name='투수'), "p_b": pd.read_excel(p_db, sheet_name='타자'), "s_p": pd.read_excel(s_db, sheet_name='투수'), "s_b": pd.read_excel(s_db, sheet_name='타자'), "c_p": pd.read_excel(c_db, sheet_name='투수'), "c_b": pd.read_excel(c_db, sheet_name='타자'), "c_ex_p": pd.read_excel(c_db, sheet_name='추가투수'), "c_ex_b": pd.read_excel(c_db, sheet_name='추가타자')}
     except Exception as e:
         st.error(f"데이터 파일 로드 실패: {e}"); return None
@@ -58,7 +72,7 @@ def get_safe_index(item_list, target_value):
 # ==========================================
 # 3. 앱 레이아웃 및 설정
 # ==========================================
-st.set_page_config(page_title="9UP 시뮬 v21.1", layout="wide")
+st.set_page_config(page_title="9UP 시뮬 v21.1", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("<style>div.row-widget.stRadio > div{flex-direction:row;}</style>", unsafe_allow_html=True)
 st.title("⚾ 9UP 프로야구 통합 시뮬레이터 v21.1")
 
@@ -145,17 +159,7 @@ if data:
                     opt_counts[opt] = opt_counts.get(opt, 0) + 1
                     if i < 5: st.divider()
                 
-                career_p_inc, career_stat_bonus = 0, {s: 0 for s in target_stats}
-                for s in c_slots:
-                    o_n, b_a, ex_a = s['옵션'], s['상승량'], 0
-                    if o_n != "미개방" and opt_counts[o_n] >= 3:
-                        match = ex_db[ex_db['옵션'] == o_n]
-                        if not match.empty: ex_a = match.iloc[0]['상승량']
-                    f_a = b_a + ex_a
-                    if o_n == "동일팀파워": career_p_inc += (f_a * team_count)
-                    elif o_n == "전체 능력치":
-                        for st_n in target_stats[:5]: career_stat_bonus[st_n] += f_a
-                    elif STAT_MAP.get(o_n) in career_stat_bonus: career_stat_bonus[STAT_MAP[o_n]] += f_a
+                career_p_inc, career_stat_bonus = calculate_career_bonuses(c_slots, opt_counts, ex_db, target_stats, team_count)
 
             # 3단계: 스킬
             with st.expander("🔮 3단계: 스킬 및 시너지 설정", expanded=False):
@@ -210,22 +214,29 @@ if data:
             exclude = ['config', 'init_21_1', 'selected_card_label']
             st.download_button("💾 설정 저장 (JSON)", data=json.dumps({k: v for k, v in st.session_state.items() if k not in exclude}, ensure_ascii=False, indent=4), file_name=f"9UP_Save_{player['이름']}_{p_grade}.json", mime="application/json")
 
-        # --- [연산 엔진: 보정된 각인 파워 로직] ---
-        mid_p_pre = weight_p + syn_p + sp_sk_p + sk_p_inc_only + career_p_inc + buff
+        # --- [연산 엔진: UI 상태와 분리된 순수 계산 로직] ---
         eng_p_total_pct = eng_p1 + eng_p2
-        eng_p_bonus = int(mid_p_pre * (eng_p_total_pct / 100))
-        mid_p_final = mid_p_pre + eng_p_bonus
-        
-        dist_each = (mid_p_final - base_p) / 5
-        mid_stats = {col: player[col] + (dist_each if i < 5 else 0) for i, col in enumerate(target_stats)}
-        final_stats = {}
-        for i, col in enumerate(target_stats):
-            val = mid_stats[col]
-            for sk in used_s:
-                if col in sk and pd.notna(sk[col]): val += mid_stats[col] * (sk[col] / 100) if not (p_type == '투수' and sk['이름'] == '맞춰잡기' and col == '한계투구') else 10
-            val += career_stat_bonus[col] + eng_stats[col]
-            if i < 5: val += (clan_lv/5) + binder_lv + (binder_cat_sum/5) + (bt_total/5)
-            final_stats[col] = val
+        calc_result = calculate_final_stats(
+            player=player,
+            target_stats=target_stats,
+            used_skills=used_s,
+            career_stat_bonus=career_stat_bonus,
+            eng_stats=eng_stats,
+            base_power=base_p,
+            weight_power=weight_p,
+            syn_power=syn_p,
+            special_skill_power=sp_sk_p,
+            skill_power_bonus=sk_p_inc_only,
+            career_power_bonus=career_p_inc,
+            buff=buff,
+            engraving_power_pct=eng_p_total_pct,
+            clan_level=clan_lv,
+            binder_level=binder_lv,
+            binder_category_sum=binder_cat_sum,
+            breakthrough_total=bt_total,
+        )
+        eng_p_bonus = calc_result["engraving_power_bonus"]
+        final_stats = calc_result["final_stats"]
 
         with col_res:
             st.subheader("📊 실전 분석 리포트")

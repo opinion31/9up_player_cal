@@ -61,3 +61,84 @@ def calculate_power_and_stats(player, inputs, target_stats, skill_db, ex_db):
         final_stats[col] = val
 
     return mid_p, final_stats, mid_stats
+
+def calculate_career_bonuses(c_slots, opt_counts, ex_db, target_stats, team_count):
+    career_p_inc = 0
+    career_stat_bonus = {s: 0 for s in target_stats}
+
+    for slot in c_slots:
+        opt_name, base_amount, extra_amount = slot['옵션'], slot['상승량'], 0
+        if opt_name != "미개방" and opt_counts[opt_name] >= 3:
+            match = ex_db[ex_db['옵션'] == opt_name]
+            if not match.empty:
+                extra_amount = match.iloc[0]['상승량']
+
+        final_amount = base_amount + extra_amount
+        if opt_name == "동일팀파워":
+            career_p_inc += final_amount * team_count
+        elif opt_name == "전체 능력치":
+            for stat_name in target_stats[:5]:
+                career_stat_bonus[stat_name] += final_amount
+        elif STAT_MAP.get(opt_name) in career_stat_bonus:
+            career_stat_bonus[STAT_MAP[opt_name]] += final_amount
+
+    return career_p_inc, career_stat_bonus
+
+def calculate_final_stats(
+    player,
+    target_stats,
+    used_skills,
+    career_stat_bonus,
+    eng_stats,
+    base_power,
+    weight_power,
+    syn_power,
+    special_skill_power,
+    skill_power_bonus,
+    career_power_bonus,
+    buff,
+    engraving_power_pct,
+    clan_level,
+    binder_level,
+    binder_category_sum,
+    breakthrough_total,
+):
+    mid_power_pre = (
+        weight_power
+        + syn_power
+        + special_skill_power
+        + skill_power_bonus
+        + career_power_bonus
+        + buff
+    )
+    engraving_power_bonus = int(mid_power_pre * (engraving_power_pct / 100))
+    mid_power_final = mid_power_pre + engraving_power_bonus
+
+    distributed_each = (mid_power_final - base_power) / 5
+    mid_stats = {
+        col: player[col] + (distributed_each if index < 5 else 0)
+        for index, col in enumerate(target_stats)
+    }
+
+    final_stats = {}
+    for index, col in enumerate(target_stats):
+        value = mid_stats[col]
+        for skill in used_skills:
+            if col in skill and pd.notna(skill[col]):
+                if player['구분'] == '투수' and skill['이름'] == '맞춰잡기' and col == '한계투구':
+                    value += 10
+                else:
+                    value += mid_stats[col] * (skill[col] / 100)
+
+        value += career_stat_bonus[col] + eng_stats[col]
+        if index < 5:
+            value += (clan_level / 5) + binder_level + (binder_category_sum / 5) + (breakthrough_total / 5)
+        final_stats[col] = value
+
+    return {
+        "mid_power_pre": mid_power_pre,
+        "engraving_power_bonus": engraving_power_bonus,
+        "mid_power_final": mid_power_final,
+        "mid_stats": mid_stats,
+        "final_stats": final_stats,
+    }
