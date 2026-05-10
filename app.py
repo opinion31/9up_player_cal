@@ -4,6 +4,7 @@ import re
 import plotly.graph_objects as go
 import json
 from pathlib import Path
+import hashlib
 from logic import calculate_career_bonuses, calculate_final_stats
 
 # ==========================================
@@ -69,6 +70,22 @@ def get_safe_index(item_list, target_value):
         return items.index(str(target_value)) if str(target_value) in items else 0
     except: return 0
 
+def apply_uploaded_settings(uploaded_file):
+    raw_data = uploaded_file.getvalue()
+    file_hash = hashlib.md5(raw_data).hexdigest()
+    if st.session_state.get("_loaded_settings_hash") == file_hash:
+        return
+
+    settings = json.loads(raw_data.decode("utf-8-sig"))
+    if "selected_card_label" not in settings and "card_label" in settings:
+        settings["selected_card_label"] = settings["card_label"]
+    for key, value in settings.items():
+        st.session_state[key] = value
+
+    st.session_state["_loaded_settings_hash"] = file_hash
+    st.session_state["_settings_loaded"] = True
+    st.rerun()
+
 # ==========================================
 # 3. 앱 레이아웃 및 설정
 # ==========================================
@@ -89,7 +106,8 @@ if data:
         st.header("📂 데이터 관리")
         uploaded = st.file_uploader("JSON 설정 불러오기", type="json")
         if uploaded:
-            for k, v in json.load(uploaded).items(): st.session_state[k] = v
+            apply_uploaded_settings(uploaded)
+        if st.session_state.pop("_settings_loaded", False):
             st.success("데이터 로드 완료!")
         st.divider()
         st.header("🔍 검색 및 팀 설정")
@@ -106,7 +124,7 @@ if data:
         res = pd.concat([p, b], ignore_index=True)
         if len(res) > 0:
             res['label'] = res.apply(lambda x: f"[{str(x['연도'])}] {x['구단']} {x['이름']} ({x['등급']})", axis=1)
-            choice_idx = get_safe_index(res['label'].tolist(), st.session_state.get('card_label', ""))
+            choice_idx = get_safe_index(res['label'].tolist(), st.session_state.get('selected_card_label', ""))
             return res[res['label'] == st.selectbox("분석 대상 선택", res['label'].tolist(), index=choice_idx, key="selected_card_label")].iloc[0]
         return None
 
@@ -211,7 +229,7 @@ if data:
                     bt_total = rar_data.get(bt_lv, 0)
 
             st.divider()
-            exclude = ['config', 'init_21_1', 'selected_card_label']
+            exclude = ['config', 'init_21_1', '_loaded_settings_hash', '_settings_loaded']
             st.download_button("💾 설정 저장 (JSON)", data=json.dumps({k: v for k, v in st.session_state.items() if k not in exclude}, ensure_ascii=False, indent=4), file_name=f"9UP_Save_{player['이름']}_{p_grade}.json", mime="application/json")
 
         # --- [연산 엔진: UI 상태와 분리된 순수 계산 로직] ---
