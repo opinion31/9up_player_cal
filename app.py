@@ -76,13 +76,13 @@ def get_number_state(key, default=0):
     except (TypeError, ValueError):
         return default
 
-def format_stage_gain(power=0, stats=0):
+def format_stage_summary(power=0, stats=0):
     parts = []
     if power:
         parts.append(f"파워 +{power:,.0f}")
     if stats:
         parts.append(f"스탯 +{stats:,.1f}")
-    return f" ({' / '.join(parts)})" if parts else " (획득 없음)"
+    return " / ".join(parts) if parts else "획득 없음"
 
 def get_career_options(career_db, grade):
     db_opts = list(career_db[career_db['등급'] == grade]['옵션'].dropna().unique())
@@ -243,7 +243,8 @@ if data:
 
         with col_in:
             # 1단계: 육성
-            with st.expander(f"🛠️ 1단계: 선수 육성 및 강화{format_stage_gain(power=stage1_power_gain)}", expanded=False):
+            st.caption(f"1단계 획득: {format_stage_summary(power=stage1_power_gain)}")
+            with st.expander("🛠️ 1단계: 선수 육성 및 강화", expanded=False):
                 l1, l2, l3 = st.columns(3)
                 p_lv, c_lv, car_lv = l1.number_input("선수레벨", 1, 100, key="p_lv"), l2.number_input("구단레벨", 1, 100, key="c_lv"), l3.number_input("커리어레벨", 1, 150, key="car_lv")
                 atl_lv, max_e = st.slider("도감 단계", 0, 10, key="atl_lv"), (10 if p_grade == "DGN" else 15)
@@ -253,7 +254,8 @@ if data:
                 weight_p = base_p + ((p_lv-1)*10) + cl_bonus + (car_lv-1) + (GRADE_CONSTANTS[p_grade]['atlas']*atl_lv) + (GRADE_CONSTANTS[p_grade]['enhance']*enh_lv)
 
             # 2단계: 커리어 ([수정] 미개방 옵션 추가)
-            with st.expander(f"🧬 2단계: 커리어 슬롯 설정{format_stage_gain(power=stage2_power_gain, stats=stage2_stat_gain)}", expanded=False):
+            st.caption(f"2단계 획득: {format_stage_summary(power=stage2_power_gain, stats=stage2_stat_gain)}")
+            with st.expander("🧬 2단계: 커리어 슬롯 설정", expanded=False):
                 c_slots, opt_counts = [], {}
                 for i in range(6):
                     st.markdown(f"**📍 슬롯 {i+1}**")
@@ -280,7 +282,8 @@ if data:
                 career_p_inc, career_stat_bonus = calculate_career_bonuses(c_slots, opt_counts, ex_db, target_stats, team_count)
 
             # 3단계: 스킬
-            with st.expander(f"🔮 3단계: 스킬 및 시너지 설정{format_stage_gain(power=stage3_power_gain)}", expanded=False):
+            st.caption(f"3단계 획득: {format_stage_summary(power=stage3_power_gain)}")
+            with st.expander("🔮 3단계: 스킬 및 시너지 설정", expanded=False):
                 avail_s = ["없음"] + [s.strip() for s in str(player['스킬']).split(',')] if pd.notna(player['스킬']) else ["없음"]
                 sk1, sk2, sk3 = st.selectbox("스킬1", avail_s, key="sk1"), st.selectbox("스킬2", avail_s, key="sk2"), st.selectbox("스킬3", avail_s, key="sk3")
                 used_s = [skill_db[skill_db['이름'] == n].iloc[0] for n in [sk1, sk2, sk3] if n != "없음"]
@@ -290,7 +293,8 @@ if data:
                 sk_p_inc_only = sum([int(weight_p * (sk['파워']/100)) for sk in used_s if '파워' in sk and pd.notna(sk['파워'])])
 
             # 4단계: 각인 ([수정] 각인 파워 1, 2 정수화)
-            with st.expander(f"💎 4단계: 각인 및 각인 파워 설정{format_stage_gain(power=stage4_power_gain, stats=stage4_stat_gain)}", expanded=False):
+            st.caption(f"4단계 획득: {format_stage_summary(power=stage4_power_gain, stats=stage4_stat_gain)}")
+            with st.expander("💎 4단계: 각인 및 각인 파워 설정", expanded=False):
                 st.markdown("### ⚡ 각인 파워 (%)")
                 c1, c2 = st.columns(2)
                 p_opts = [0, 1, 2, 3]
@@ -307,7 +311,8 @@ if data:
                         eng_stats[stat] = v1 + v2
 
             # 5단계: 클랜/바인더
-            with st.expander(f"🏛️ 5단계: 클랜 및 바인더 설정{format_stage_gain(stats=stage5_stat_gain)}", expanded=False):
+            st.caption(f"5단계 획득: {format_stage_summary(stats=stage5_stat_gain)}")
+            with st.expander("🏛️ 5단계: 클랜 및 바인더 설정", expanded=False):
                 bc1, bc2 = st.columns(2)
                 clan_lv, binder_lv = bc1.slider("클랜 레벨", 0, 15, key="clan_lv"), bc2.number_input("바인더 레벨", 0, 100, key="binder_lv")
                 cat_cols, cat_v, b_res = st.columns(5), [0, 10, 17, 22, 25, 27], []
@@ -316,7 +321,8 @@ if data:
                 binder_cat_sum = sum(b_res)
 
             # 6단계: 돌파
-            with st.expander(f"🔓 6단계: 돌파 설정{format_stage_gain(stats=stage6_stat_gain)}", expanded=False):
+            st.caption(f"6단계 획득: {format_stage_summary(stats=stage6_stat_gain)}")
+            with st.expander("🔓 6단계: 돌파 설정", expanded=False):
                 bt_total = 0
                 if p_grade == "DGN" or p_cost >= 6 or p_cost == 0: st.warning("돌파 불가")
                 else:
