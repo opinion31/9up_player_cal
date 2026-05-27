@@ -57,6 +57,11 @@ def get_safe_index(item_list, target_value):
         return items.index(str(target_value)) if str(target_value) in items else 0
     except: return 0
 
+def format_synergy(value):
+    if pd.isna(value) or str(value).strip() == "":
+        return "시너지 없음"
+    return str(value).strip()
+
 def get_player_pool(data):
     p, b = data["p_p"].copy(), data["p_b"].copy()
     p["구분"], b["구분"] = "투수", "타자"
@@ -161,8 +166,8 @@ def render_saved_comparison(data, left_config, right_config):
 
     st.subheader("🧾 비교 요약")
     summary = pd.DataFrame([
-        {"구분": "A", "선수": left["label"], "중간 파워": f"{left['mid_power']:,.0f}", "최종 실전 파워": f"{left['total_power']:,.0f}"},
-        {"구분": "B", "선수": right["label"], "중간 파워": f"{right['mid_power']:,.0f}", "최종 실전 파워": f"{right['total_power']:,.0f}"},
+        {"구분": "A", "선수": left["label"], "시너지": format_synergy(left["player"].get("시너지")), "중간 파워": f"{left['mid_power']:,.0f}", "최종 실전 파워": f"{left['total_power']:,.0f}"},
+        {"구분": "B", "선수": right["label"], "시너지": format_synergy(right["player"].get("시너지")), "중간 파워": f"{right['mid_power']:,.0f}", "최종 실전 파워": f"{right['total_power']:,.0f}"},
     ])
     st.table(summary)
 
@@ -206,20 +211,29 @@ if data:
             st.divider()
             st.header("🔍 검색 및 팀 설정")
             name_in = st.text_input("선수명", key="player_name_input")
+            synergy_in = st.text_input("시너지", key="synergy_search_input")
             grade_fil = st.selectbox("등급 필터", ["전체"] + list(GRADE_CONSTANTS.keys()), key="grade_filter")
             user_team = st.selectbox("내 구단 설정", sorted(list(set(data['p_p']['구단'].dropna()))), key="user_team_select")
             team_count = st.number_input("같은 팀원 수 (1~28)", 1, 28, key="team_count")
     
         def find_player():
             p, b = data['p_p'].copy(), data['p_b'].copy()
-            if name_in: p, b = p[p['이름'].str.contains(name_in, na=False)], b[b['이름'].str.contains(name_in, na=False)]
+            if name_in or synergy_in:
+                p_name_mask = p['이름'].astype(str).str.contains(name_in, na=False, case=False, regex=False) if name_in else pd.Series(False, index=p.index)
+                b_name_mask = b['이름'].astype(str).str.contains(name_in, na=False, case=False, regex=False) if name_in else pd.Series(False, index=b.index)
+                p_synergy_mask = p['시너지'].astype(str).str.contains(synergy_in, na=False, case=False, regex=False) if synergy_in else pd.Series(False, index=p.index)
+                b_synergy_mask = b['시너지'].astype(str).str.contains(synergy_in, na=False, case=False, regex=False) if synergy_in else pd.Series(False, index=b.index)
+                p_mask = p_name_mask | p_synergy_mask
+                b_mask = b_name_mask | b_synergy_mask
+                p, b = p[p_mask], b[b_mask]
             if grade_fil != "전체": p, b = p[p['등급'] == grade_fil], b[b['등급'] == grade_fil]
             p['구분'], b['구분'] = '투수', '타자'
             res = pd.concat([p, b], ignore_index=True)
             if len(res) > 0:
                 res['label'] = res.apply(lambda x: f"[{str(x['연도'])}] {x['구단']} {x['이름']} ({x['등급']})", axis=1)
                 choice_idx = get_safe_index(res['label'].tolist(), st.session_state.get('selected_card_label', st.session_state.get('card_label', "")))
-                return res[res['label'] == st.selectbox("분석 대상 선택", res['label'].tolist(), index=choice_idx, key="selected_card_label")].iloc[0]
+                selected_label = st.selectbox("분석 대상 선택", res['label'].tolist(), index=choice_idx, key="selected_card_label")
+                return res[res['label'] == selected_label].iloc[0]
             return None
     
         player = find_player()
@@ -231,7 +245,7 @@ if data:
             graph_labels = P_GRAPH_ORDER if p_type == '투수' else B_GRAPH_ORDER
             skill_db, career_db, ex_db = (data['s_p'], data['c_p'], data['c_ex_p']) if p_type == '투수' else (data['s_b'], data['c_b'], data['c_ex_b'])
     
-            st.success(f"🎯 분석 대상: [{str(player['연도'])}] {p_team} {player['이름']} ({p_grade} / {p_cost}코스트)")
+            st.success(f"🎯 분석 대상: [{str(player['연도'])}] {p_team} {player['이름']} ({p_grade} / {p_cost}코스트) | 시너지: {format_synergy(player.get('시너지'))}")
             col_in, col_res = st.columns([1.4, 1.1])
     
             with col_in:
