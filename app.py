@@ -182,7 +182,7 @@ def render_saved_comparison(data, left_config, right_config):
 # ==========================================
 # 3. 앱 레이아웃 및 설정
 # ==========================================
-st.set_page_config(page_title="9UP 시뮬 v21.1", layout="wide")
+st.set_page_config(page_title="9UP 시뮬 v21.1", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("<style>div.row-widget.stRadio > div{flex-direction:row;}</style>", unsafe_allow_html=True)
 st.title("⚾ 9UP 프로야구 통합 시뮬레이터 v21.1")
 
