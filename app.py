@@ -123,14 +123,36 @@ def apply_uploaded_settings(uploaded_file):
         return
 
     settings = json.loads(raw_data.decode("utf-8-sig"))
+    apply_settings(settings, "데이터 로드 완료!", file_hash)
+
+def apply_settings(settings, success_message, file_hash=None):
     if "selected_card_label" not in settings and "card_label" in settings:
         settings["selected_card_label"] = settings["card_label"]
     for key, value in settings.items():
         st.session_state[key] = value
 
-    st.session_state["_loaded_settings_hash"] = file_hash
-    st.session_state["_settings_loaded"] = True
+    if file_hash:
+        st.session_state["_loaded_settings_hash"] = file_hash
+    else:
+        st.session_state.pop("_loaded_settings_hash", None)
+    st.session_state["_settings_uploader_version"] = st.session_state.get("_settings_uploader_version", 0) + 1
+    st.session_state["_settings_loaded"] = success_message
     st.rerun()
+
+def get_exportable_settings():
+    excluded_keys = {
+        "config",
+        "init_21_1",
+        "compare_a_json",
+        "compare_b_json",
+    }
+    return {
+        key: value
+        for key, value in st.session_state.items()
+        if key not in excluded_keys
+        and not key.startswith("_")
+        and not key.startswith("settings_json_")
+    }
 
 def format_synergy(value):
     if pd.isna(value) or str(value).strip() == "":
@@ -274,11 +296,17 @@ if data:
     with analysis_tab:
         with st.sidebar:
             st.header("📂 데이터 관리")
-            uploaded = st.file_uploader("JSON 설정 불러오기", type="json")
+            uploader_version = st.session_state.get("_settings_uploader_version", 0)
+            uploaded = st.file_uploader(
+                "JSON 설정 불러오기",
+                type="json",
+                key=f"settings_json_{uploader_version}",
+            )
             if uploaded:
                 apply_uploaded_settings(uploaded)
-            if st.session_state.pop("_settings_loaded", False):
-                st.success("데이터 로드 완료!")
+            loaded_message = st.session_state.pop("_settings_loaded", None)
+            if loaded_message:
+                st.success(loaded_message)
             st.divider()
             st.header("🔍 검색 및 팀 설정")
             name_in = st.text_input("선수명", key="player_name_input")
@@ -455,8 +483,7 @@ if data:
                         bt_total = rar_data.get(bt_lv, 0)
     
                 st.divider()
-                exclude = ['config', 'init_21_1', '_loaded_settings_hash', '_settings_loaded']
-                st.download_button("💾 설정 저장 (JSON)", data=json.dumps({k: v for k, v in st.session_state.items() if k not in exclude}, ensure_ascii=False, indent=4), file_name=f"9UP_Save_{player['이름']}_{p_grade}.json", mime="application/json")
+                st.download_button("💾 설정 저장 (JSON)", data=json.dumps(get_exportable_settings(), ensure_ascii=False, indent=4), file_name=f"9UP_Save_{player['이름']}_{p_grade}.json", mime="application/json")
     
             # --- [연산 엔진: UI 상태와 분리된 순수 계산 로직] ---
             eng_p_total_pct = eng_p1 + eng_p2
@@ -508,6 +535,11 @@ if data:
             try:
                 config_a = json.load(uploaded_a)
                 config_b = json.load(uploaded_b)
+                edit_a, edit_b = st.columns(2)
+                if edit_a.button("A 설정 편집", width="stretch"):
+                    apply_settings(config_a, "A 설정을 분석 편집기에 적용했습니다.")
+                if edit_b.button("B 설정 편집", width="stretch"):
+                    apply_settings(config_b, "B 설정을 분석 편집기에 적용했습니다.")
                 render_saved_comparison(data, config_a, config_b)
             except Exception as e:
                 st.error(f"비교 데이터를 불러오지 못했습니다: {e}")
