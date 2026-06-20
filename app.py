@@ -3,6 +3,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import json
 import re
+import hashlib
 from pathlib import Path
 from constants import (
     BATTER_STATS,
@@ -15,9 +16,8 @@ from constants import (
     PITCHER_STATS,
     P_GRAPH_ORDER,
     PLAYER_DB_GLOB,
-    STAT_MAP,
 )
-from logic import is_same_team
+from logic import calculate_career_bonuses, calculate_final_stats, is_same_team
 
 # ==========================================
 # 2. 유틸리티 함수
@@ -56,6 +56,81 @@ def get_safe_index(item_list, target_value):
         items = [str(x) for x in item_list]
         return items.index(str(target_value)) if str(target_value) in items else 0
     except: return 0
+
+def get_number_state(key, default=0):
+    try:
+        return float(st.session_state.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+def format_stage_summary(power=0, stats=0):
+    parts = []
+    if power:
+        parts.append(f"파워 +{power:,.0f}")
+    if stats:
+        parts.append(f"스탯 +{stats:,.1f}")
+    return " / ".join(parts) if parts else "획득 없음"
+
+def get_career_options(career_db, grade):
+    db_opts = list(career_db[career_db['등급'] == grade]['옵션'].dropna().unique())
+    ordered_opts = ["미개방"]
+    if "동일팀파워" in db_opts:
+        ordered_opts.append("동일팀파워")
+    ordered_opts.extend([opt for opt in db_opts if opt != "동일팀파워"])
+    return ordered_opts
+
+def build_career_slots_from_state(career_db):
+    c_slots, opt_counts = [], {}
+    for i in range(6):
+        g_opts = ["마스터"] if i == 5 else ["루키", "프로", "엘리트", "마스터"]
+        default_grade = "마스터" if i == 5 else "루키"
+        grade = st.session_state.get(f"g{i}", default_grade)
+        if grade not in g_opts:
+            grade = default_grade
+
+        options = get_career_options(career_db, grade)
+        opt = st.session_state.get(f"o{i}", "미개방")
+        if opt not in options:
+            opt = "미개방"
+
+        amount = 0
+        if opt != "미개방":
+            vals = career_db[(career_db['등급'] == grade) & (career_db['옵션'] == opt)]['상승량'].tolist()
+            if vals:
+                saved_amount = st.session_state.get(f"a{i}", vals[0])
+                amount = vals[get_safe_index(vals, saved_amount)]
+
+        c_slots.append({"옵션": opt, "상승량": amount})
+        opt_counts[opt] = opt_counts.get(opt, 0) + 1
+    return c_slots, opt_counts
+
+def get_selected_skills_from_state(player, skill_db):
+    avail_skills = ["없음"] + [s.strip() for s in str(player['스킬']).split(',')] if pd.notna(player['스킬']) else ["없음"]
+    selected_names = [st.session_state.get(key, "없음") for key in ["sk1", "sk2", "sk3"]]
+    used_skills = []
+    for name in selected_names:
+        if name == "없음" or name not in avail_skills:
+            continue
+        match = skill_db[skill_db['이름'] == name]
+        if not match.empty:
+            used_skills.append(match.iloc[0])
+    return used_skills
+
+def apply_uploaded_settings(uploaded_file):
+    raw_data = uploaded_file.getvalue()
+    file_hash = hashlib.md5(raw_data).hexdigest()
+    if st.session_state.get("_loaded_settings_hash") == file_hash:
+        return
+
+    settings = json.loads(raw_data.decode("utf-8-sig"))
+    if "selected_card_label" not in settings and "card_label" in settings:
+        settings["selected_card_label"] = settings["card_label"]
+    for key, value in settings.items():
+        st.session_state[key] = value
+
+    st.session_state["_loaded_settings_hash"] = file_hash
+    st.session_state["_settings_loaded"] = True
+    st.rerun()
 
 def format_synergy(value):
     if pd.isna(value) or str(value).strip() == "":
@@ -103,23 +178,13 @@ def calculate_saved_result(data, config):
         c_slots.append({"옵션": opt, "상승량": amt})
         opt_counts[opt] = opt_counts.get(opt, 0) + 1
 
-    career_p_inc, career_stat_bonus = 0, {s: 0 for s in target_stats}
-    for slot in c_slots:
-        o_n, b_a, ex_a = slot["옵션"], slot["상승량"], 0
-        if o_n != "미개방" and opt_counts[o_n] >= 3:
-            match = ex_db[ex_db["옵션"] == o_n]
-            if not match.empty: ex_a = match.iloc[0]["상승량"]
-        f_a = b_a + ex_a
-        if o_n == "동일팀파워": career_p_inc += (f_a * team_count)
-        elif o_n == "전체 능력치":
-            for st_n in target_stats[:5]: career_stat_bonus[st_n] += f_a
-        elif STAT_MAP.get(o_n) in career_stat_bonus: career_stat_bonus[STAT_MAP[o_n]] += f_a
+    career_p_inc, career_stat_bonus = calculate_career_bonuses(c_slots, opt_counts, ex_db, target_stats, team_count)
 
     selected_skills = [config.get("sk1", "없음"), config.get("sk2", "없음"), config.get("sk3", "없음")]
     used_s = [skill_db[skill_db["이름"] == n].iloc[0] for n in selected_skills if n != "없음" and not skill_db[skill_db["이름"] == n].empty]
     p_syn, c_syn, buff = config.get("p_syn", 0), config.get("c_syn", 0), config.get("buff", 0)
     syn_p = int(weight_p * (p_syn / 100)) + c_syn
-    sp_sk_p = (32 * team_count) if p_grade in ["ACE", "HIT"] else 0
+    sp_sk_p = (32 * team_count) if p_grade in ["ACE", "HIT", "GG"] else 0
     sk_p_inc_only = sum([int(weight_p * (sk["파워"]/100)) for sk in used_s if "파워" in sk and pd.notna(sk["파워"])])
 
     bt_total = 0
@@ -131,26 +196,31 @@ def calculate_saved_result(data, config):
             rar_data = BT_BASE_VALS.get(p_cost, {})
         bt_total = rar_data.get(config.get("bt_lv", 0), 0)
 
-    mid_p_pre = weight_p + syn_p + sp_sk_p + sk_p_inc_only + career_p_inc + buff
     eng_p_total_pct = config.get("eng_p1", 0) + config.get("eng_p2", 0)
-    eng_p_bonus = int(mid_p_pre * (eng_p_total_pct / 100))
-    mid_p_final = mid_p_pre + eng_p_bonus
-
     binder_cat_sum = sum(config.get(name, 0) for name in ["b_team", "b_pos", "b_pers", "b_year", "b_grad"])
     clan_lv, binder_lv = config.get("clan_lv", 0), config.get("binder_lv", 0)
     eng_stats = {stat: config.get(f"e1_{stat}", 0) + config.get(f"e2_{stat}", 0) for stat in target_stats}
-
-    dist_each = (mid_p_final - base_p) / 5
-    mid_stats = {col: player[col] + (dist_each if i < 5 else 0) for i, col in enumerate(target_stats)}
-    final_stats = {}
-    for i, col in enumerate(target_stats):
-        val = mid_stats[col]
-        for sk in used_s:
-            if col in sk and pd.notna(sk[col]):
-                val += mid_stats[col] * (sk[col] / 100) if not (p_type == "투수" and sk["이름"] == "맞춰잡기" and col == "한계투구") else 10
-        val += career_stat_bonus[col] + eng_stats[col]
-        if i < 5: val += (clan_lv/5) + binder_lv + (binder_cat_sum/5) + (bt_total/5)
-        final_stats[col] = val
+    calc_result = calculate_final_stats(
+        player=player,
+        target_stats=target_stats,
+        used_skills=used_s,
+        career_stat_bonus=career_stat_bonus,
+        eng_stats=eng_stats,
+        base_power=base_p,
+        weight_power=weight_p,
+        syn_power=syn_p,
+        special_skill_power=sp_sk_p,
+        skill_power_bonus=sk_p_inc_only,
+        career_power_bonus=career_p_inc,
+        buff=buff,
+        engraving_power_pct=eng_p_total_pct,
+        clan_level=clan_lv,
+        binder_level=binder_lv,
+        binder_category_sum=binder_cat_sum,
+        breakthrough_total=bt_total,
+    )
+    mid_p_final = calc_result["mid_power_final"]
+    final_stats = calc_result["final_stats"]
 
     return {
         "label": label,
@@ -206,7 +276,8 @@ if data:
             st.header("📂 데이터 관리")
             uploaded = st.file_uploader("JSON 설정 불러오기", type="json")
             if uploaded:
-                for k, v in json.load(uploaded).items(): st.session_state[k] = v
+                apply_uploaded_settings(uploaded)
+            if st.session_state.pop("_settings_loaded", False):
                 st.success("데이터 로드 완료!")
             st.divider()
             st.header("🔍 검색 및 팀 설정")
@@ -244,12 +315,55 @@ if data:
             target_stats = PITCHER_STATS if p_type == '투수' else BATTER_STATS
             graph_labels = P_GRAPH_ORDER if p_type == '투수' else B_GRAPH_ORDER
             skill_db, career_db, ex_db = (data['s_p'], data['c_p'], data['c_ex_p']) if p_type == '투수' else (data['s_b'], data['c_b'], data['c_ex_b'])
+
+            current_p_lv = get_number_state('p_lv', 100)
+            current_c_lv = get_number_state('c_lv', 100)
+            current_car_lv = get_number_state('car_lv', 150)
+            current_atl_lv = get_number_state('atl_lv', 0)
+            current_enh_lv = min(get_number_state('enh_lv', 0), 10 if p_grade == "DGN" else 15)
+            current_cl_bonus = (min(current_c_lv, 50)*10 + (max(0, current_c_lv-75))*10) if is_same_team(p_team, user_team) else (min(max(0, current_c_lv-50), 25)*10 + (max(0, current_c_lv-75))*10)
+            stage1_power_gain = ((current_p_lv-1)*10) + current_cl_bonus + (current_car_lv-1) + (GRADE_CONSTANTS[p_grade]['atlas']*current_atl_lv) + (GRADE_CONSTANTS[p_grade]['enhance']*current_enh_lv)
+            current_weight_p = base_p + stage1_power_gain
+
+            current_c_slots, current_opt_counts = build_career_slots_from_state(career_db)
+            stage2_power_gain, current_career_stat_bonus = calculate_career_bonuses(current_c_slots, current_opt_counts, ex_db, target_stats, team_count)
+            stage2_stat_gain = sum(current_career_stat_bonus.values())
+
+            current_used_skills = get_selected_skills_from_state(player, skill_db)
+            current_p_syn = get_number_state('p_syn', 0)
+            current_c_syn = get_number_state('c_syn', 0)
+            current_buff = get_number_state('buff', 0)
+            stage3_syn_power = int(current_weight_p * (current_p_syn / 100)) + current_c_syn
+            stage3_special_power = (32 * team_count) if p_grade in ['ACE', 'HIT', 'GG'] else 0
+            stage3_skill_power = sum([int(current_weight_p * (sk['파워']/100)) for sk in current_used_skills if '파워' in sk and pd.notna(sk['파워'])])
+            stage3_power_gain = stage3_syn_power + stage3_special_power + stage3_skill_power + current_buff
+
+            current_eng_pct = get_number_state('eng_p1', 0) + get_number_state('eng_p2', 0)
+            current_mid_power_pre = current_weight_p + stage2_power_gain + stage3_power_gain
+            stage4_power_gain = int(current_mid_power_pre * (current_eng_pct / 100))
+            stage4_stat_gain = sum(get_number_state(f"e1_{stat}", 0) + get_number_state(f"e2_{stat}", 0) for stat in target_stats)
+
+            current_clan_lv = get_number_state('clan_lv', 0)
+            current_binder_lv = get_number_state('binder_lv', 0)
+            binder_keys = ["b_team", "b_pos", "b_pers", "b_year", "b_grad"]
+            current_binder_cat_sum = sum(get_number_state(key, 0) for key in binder_keys)
+            stage5_stat_gain = current_clan_lv + (current_binder_lv * 5) + current_binder_cat_sum
+
+            stage6_stat_gain = 0
+            if not (p_grade == "DGN" or p_cost >= 6 or p_cost == 0):
+                if p_cost == 5:
+                    current_bt_key = "GROUP_1" if p_grade in BT_RARITY_5_DATA["GROUP_1"] else ("GROUP_3" if p_grade in BT_RARITY_5_DATA["GROUP_3"] else "GROUP_2")
+                    current_bt_data = BT_RARITY_5_DATA[current_bt_key + "_VALS"]
+                else:
+                    current_bt_data = BT_BASE_VALS.get(p_cost, {})
+                stage6_stat_gain = current_bt_data.get(st.session_state.get('bt_lv', 0), 0)
     
             st.success(f"🎯 분석 대상: [{str(player['연도'])}] {p_team} {player['이름']} ({p_grade} / {p_cost}코스트) | 시너지: {format_synergy(player.get('시너지'))}")
             col_in, col_res = st.columns([1.4, 1.1])
     
             with col_in:
                 # 1단계: 육성
+                st.caption(f"1단계 획득: {format_stage_summary(power=stage1_power_gain)}")
                 with st.expander("🛠️ 1단계: 선수 육성 및 강화", expanded=False):
                     l1, l2, l3 = st.columns(3)
                     p_lv, c_lv, car_lv = l1.number_input("선수레벨", 1, 100, key="p_lv"), l2.number_input("구단레벨", 1, 100, key="c_lv"), l3.number_input("커리어레벨", 1, 150, key="car_lv")
@@ -260,6 +374,7 @@ if data:
                     weight_p = base_p + ((p_lv-1)*10) + cl_bonus + (car_lv-1) + (GRADE_CONSTANTS[p_grade]['atlas']*atl_lv) + (GRADE_CONSTANTS[p_grade]['enhance']*enh_lv)
     
                 # 2단계: 커리어 ([수정] 미개방 옵션 추가)
+                st.caption(f"2단계 획득: {format_stage_summary(power=stage2_power_gain, stats=stage2_stat_gain)}")
                 with st.expander("🧬 2단계: 커리어 슬롯 설정", expanded=False):
                     c_slots, opt_counts = [], {}
                     for i in range(6):
@@ -267,9 +382,8 @@ if data:
                         g_opts = ["마스터"] if i == 5 else ["루키", "프로", "엘리트", "마스터"]
                         grade = st.radio(f"등급_{i}", g_opts, index=get_safe_index(g_opts, st.session_state.get(f"g{i}", "마스터" if i==5 else "루키")), key=f"g{i}", horizontal=True, label_visibility="collapsed")
                         
-                        # 옵션 리스트에 '미개방' 추가
-                        db_opts = career_db[career_db['등급'] == grade]['옵션'].unique()
-                        opts_with_none = ["미개방"] + list(db_opts)
+                        # 미개방 다음에 선호도가 높은 동일팀파워를 고정 배치
+                        opts_with_none = get_career_options(career_db, grade)
                         
                         c1, c2 = st.columns([2, 1])
                         opt = c1.selectbox(f"옵션_{i}", opts_with_none, index=get_safe_index(opts_with_none, st.session_state.get(f"o{i}", "미개방")), key=f"o{i}")
@@ -285,19 +399,10 @@ if data:
                         opt_counts[opt] = opt_counts.get(opt, 0) + 1
                         if i < 5: st.divider()
                     
-                    career_p_inc, career_stat_bonus = 0, {s: 0 for s in target_stats}
-                    for s in c_slots:
-                        o_n, b_a, ex_a = s['옵션'], s['상승량'], 0
-                        if o_n != "미개방" and opt_counts[o_n] >= 3:
-                            match = ex_db[ex_db['옵션'] == o_n]
-                            if not match.empty: ex_a = match.iloc[0]['상승량']
-                        f_a = b_a + ex_a
-                        if o_n == "동일팀파워": career_p_inc += (f_a * team_count)
-                        elif o_n == "전체 능력치":
-                            for st_n in target_stats[:5]: career_stat_bonus[st_n] += f_a
-                        elif STAT_MAP.get(o_n) in career_stat_bonus: career_stat_bonus[STAT_MAP[o_n]] += f_a
-    
+                    career_p_inc, career_stat_bonus = calculate_career_bonuses(c_slots, opt_counts, ex_db, target_stats, team_count)
+
                 # 3단계: 스킬
+                st.caption(f"3단계 획득: {format_stage_summary(power=stage3_power_gain)}")
                 with st.expander("🔮 3단계: 스킬 및 시너지 설정", expanded=False):
                     avail_s = ["없음"] + [s.strip() for s in str(player['스킬']).split(',')] if pd.notna(player['스킬']) else ["없음"]
                     sk1, sk2, sk3 = st.selectbox("스킬1", avail_s, key="sk1"), st.selectbox("스킬2", avail_s, key="sk2"), st.selectbox("스킬3", avail_s, key="sk3")
@@ -308,6 +413,7 @@ if data:
                     sk_p_inc_only = sum([int(weight_p * (sk['파워']/100)) for sk in used_s if '파워' in sk and pd.notna(sk['파워'])])
     
                 # 4단계: 각인 ([수정] 각인 파워 1, 2 정수화)
+                st.caption(f"4단계 획득: {format_stage_summary(power=stage4_power_gain, stats=stage4_stat_gain)}")
                 with st.expander("💎 4단계: 각인 및 각인 파워 설정", expanded=False):
                     st.markdown("### ⚡ 각인 파워 (%)")
                     c1, c2 = st.columns(2)
@@ -325,6 +431,7 @@ if data:
                             eng_stats[stat] = v1 + v2
     
                 # 5단계: 클랜/바인더
+                st.caption(f"5단계 획득: {format_stage_summary(stats=stage5_stat_gain)}")
                 with st.expander("🏛️ 5단계: 클랜 및 바인더 설정", expanded=False):
                     bc1, bc2 = st.columns(2)
                     clan_lv, binder_lv = bc1.slider("클랜 레벨", 0, 15, key="clan_lv"), bc2.number_input("바인더 레벨", 0, 100, key="binder_lv")
@@ -334,6 +441,7 @@ if data:
                     binder_cat_sum = sum(b_res)
     
                 # 6단계: 돌파
+                st.caption(f"6단계 획득: {format_stage_summary(stats=stage6_stat_gain)}")
                 with st.expander("🔓 6단계: 돌파 설정", expanded=False):
                     bt_total = 0
                     if p_grade == "DGN" or p_cost >= 6 or p_cost == 0: st.warning("돌파 불가")
@@ -347,25 +455,33 @@ if data:
                         bt_total = rar_data.get(bt_lv, 0)
     
                 st.divider()
-                exclude = ['config', 'init_21_1']
+                exclude = ['config', 'init_21_1', '_loaded_settings_hash', '_settings_loaded']
                 st.download_button("💾 설정 저장 (JSON)", data=json.dumps({k: v for k, v in st.session_state.items() if k not in exclude}, ensure_ascii=False, indent=4), file_name=f"9UP_Save_{player['이름']}_{p_grade}.json", mime="application/json")
     
-            # --- [연산 엔진: 보정된 각인 파워 로직] ---
-            mid_p_pre = weight_p + syn_p + sp_sk_p + sk_p_inc_only + career_p_inc + buff
+            # --- [연산 엔진: UI 상태와 분리된 순수 계산 로직] ---
             eng_p_total_pct = eng_p1 + eng_p2
-            eng_p_bonus = int(mid_p_pre * (eng_p_total_pct / 100))
-            mid_p_final = mid_p_pre + eng_p_bonus
-            
-            dist_each = (mid_p_final - base_p) / 5
-            mid_stats = {col: player[col] + (dist_each if i < 5 else 0) for i, col in enumerate(target_stats)}
-            final_stats = {}
-            for i, col in enumerate(target_stats):
-                val = mid_stats[col]
-                for sk in used_s:
-                    if col in sk and pd.notna(sk[col]): val += mid_stats[col] * (sk[col] / 100) if not (p_type == '투수' and sk['이름'] == '맞춰잡기' and col == '한계투구') else 10
-                val += career_stat_bonus[col] + eng_stats[col]
-                if i < 5: val += (clan_lv/5) + binder_lv + (binder_cat_sum/5) + (bt_total/5)
-                final_stats[col] = val
+            calc_result = calculate_final_stats(
+                player=player,
+                target_stats=target_stats,
+                used_skills=used_s,
+                career_stat_bonus=career_stat_bonus,
+                eng_stats=eng_stats,
+                base_power=base_p,
+                weight_power=weight_p,
+                syn_power=syn_p,
+                special_skill_power=sp_sk_p,
+                skill_power_bonus=sk_p_inc_only,
+                career_power_bonus=career_p_inc,
+                buff=buff,
+                engraving_power_pct=eng_p_total_pct,
+                clan_level=clan_lv,
+                binder_level=binder_lv,
+                binder_category_sum=binder_cat_sum,
+                breakthrough_total=bt_total,
+            )
+            eng_p_bonus = calc_result["engraving_power_bonus"]
+            mid_p_final = calc_result["mid_power_final"]
+            final_stats = calc_result["final_stats"]
     
             with col_res:
                 st.subheader("📊 실전 분석 리포트")
